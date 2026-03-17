@@ -1,0 +1,8 @@
+torch
+torchvision
+torchaudio
+ultralytics
+gradio
+opencv-python-headless
+requests
+gdown

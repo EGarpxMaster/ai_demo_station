@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  brain_service:
+    image: ollama/ollama:latest
+    container_name: brain_service
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models/llm:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Inicia el servidor y descarga el modelo pequeño (Llama 3.2 1B o Qwen para ahorrar VRAM) si no existe.
+    entrypoint: [ "/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull llama3.2:1b && wait" ]
+    restart: unless-stopped
+
+  voice_service:
+    build:
+      context: ./voice_service
+    container_name: voice_service
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./models/voice:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  vision_service:
+    build:
+      context: ./vision_service
+    container_name: vision_service
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./models/vision:/app/models
+      # Se expone /dev/video0 para Linux. En Windows (WSL2) esto requiere usbipd-win para
+      # mapear la webcam, o bien comentar esta sección y usar un input de video de red 
+      # si se desea correr 100% en Docker.
+    devices:
+      - "/dev/video0:/dev/video0"
+    privileged: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BRAIN_URL=http://brain_service:11434
+      - VOICE_URL=http://voice_service:5002
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      - brain_service
+      - voice_service
