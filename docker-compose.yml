@@ -49,8 +49,6 @@ services:
       # Se expone /dev/video0 para Linux. En Windows (WSL2) esto requiere usbipd-win para
       # mapear la webcam, o bien comentar esta sección y usar un input de video de red 
       # si se desea correr 100% en Docker.
-    devices:
-      - "/dev/video0:/dev/video0"
     privileged: true
     environment:
       - PYTHONUNBUFFERED=1

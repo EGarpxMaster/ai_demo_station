@@ -1,8 +1,9 @@
 import os
 import torch
-import torchaudio
 from flask import Flask, request, send_file
 import tempfile
+import numpy as np
+from scipy.io import wavfile
 
 # ==========================================
 # 1. AUDITORÍA DE HARDWARE (VRAM)
@@ -25,13 +26,72 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"[Voice Service] Cargando modelo Silero TTS en {device}...")
 
 # Silero usa un repositorio de PyTorch Hub para descargar pesos
-model, example_text = torch.hub.load(
-    repo_or_dir='snakers4/silero-tts',
-    model='silero_tts',
-    language='es',
-    speaker='v3_es'
-)
+# Debido a límites de tasa de la API de GitHub (que causan KeyError 'Authorization'),
+# descargaremos el repositorio localmente si no existe.
+local_repo_dir = '/app/models/silero-tts'
+if not os.path.exists(local_repo_dir):
+    print("[Voice Service] Descargando repositorio de Silero TTS localmente para evitar rate-limits...")
+    import urllib.request
+    import zipfile
+    import shutil
+    
+    zip_path = '/app/models/silero.zip'
+    url = "https://github.com/snakers4/silero-models/archive/refs/heads/master.zip"
+    
+    # Descargar
+    urllib.request.urlretrieve(url, zip_path)
+    print("[Voice Service] Descomprimiendo...")
+    
+    # Extraer
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall('/app/models/')
+        
+    # Renombrar carpeta
+    extracted_dir = '/app/models/silero-models-master'
+    if os.path.exists(extracted_dir):
+        shutil.move(extracted_dir, local_repo_dir)
+        
+    # Limpiar
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
+    print("[Voice Service] Repositorio Silero TTS preparado localmente.")
+
+try:
+    model, example_text = torch.hub.load(
+        repo_or_dir=local_repo_dir,
+        source='local',
+        model='silero_tts',
+        language='es',
+        speaker='v3_es'
+    )
+except Exception as e:
+    print(f"Error cargando desde local, intentando remoto con trust_repo=True: {e}")
+    model, example_text = torch.hub.load(
+        repo_or_dir='snakers4/silero-tts',
+        model='silero_tts',
+        language='es',
+        speaker='v3_es',
+        trust_repo=True
+    )
 model.to(device)
+
+def normalize_text(text):
+    """Preprocesar texto para que Silero TTS lo lea correctamente."""
+    import re
+    # Convertir números a palabras en español
+    try:
+        from num2words import num2words
+        text = re.sub(r'\b\d+\b', lambda m: num2words(int(m.group()), lang='es'), text)
+    except ImportError:
+        pass
+    # Reemplazar signos de puntuación problemáticos
+    text = text.replace('¿', '').replace('¡', '')
+    text = text.replace('%', ' por ciento')
+    text = text.replace('°C', ' grados')
+    text = text.replace('km/h', ' kilómetros por hora')
+    text = re.sub(r'[^\w\s\.,;áéíóúüñÁÉÍÓÚÜÑ]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
@@ -41,21 +101,26 @@ def synthesize():
         return {"error": "Texto vacío"}, 400
     
     try:
+        # Normalizar texto: números → palabras, eliminar signos problemáticos
+        text = normalize_text(text)
+        # Truncar para evitar crasheos del modelo
+        text = text[:300] if len(text) > 300 else text
+        
         # Generar Audio
-        # Limitado por defecto por Silero a strings razonables
-        # speaker es_0, es_1, es_2 son voces españolas
         audio = model.apply_tts(
             text=text,
             speaker='es_0',
             sample_rate=48000
         )
         
-        # Guardar en temp
+        # Guardar en temp usando scipy (no requiere TorchCodec)
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
         
-        # Guardar tensor a wav local
-        # Silero devuelve tensor de 1D, torchaudio requiere 2D [channels, time]
-        torchaudio.save(temp_file.name, audio.unsqueeze(0).cpu(), 48000)
+        # Convertir tensor a numpy y guardar como WAV
+        audio_numpy = audio.cpu().numpy()
+        # Normalizar a int16
+        audio_int16 = (audio_numpy * 32767).astype(np.int16)
+        wavfile.write(temp_file.name, 48000, audio_int16)
         
         return send_file(temp_file.name, mimetype='audio/wav')
     except Exception as e:

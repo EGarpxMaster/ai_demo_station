@@ -1,0 +1,24 @@
+# Entorno virtual y Python
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Modelos y archivos pesados
+models/
+*.pt
+*.onnx
+*.engine
+
+# Archivos de audio temporales
+*.wav
+*.mp3
+
+# Configuración y secretos
+.env
+
+# IDEs y otros
+.project
+.vscode/
+.idea/
+.DS_Store

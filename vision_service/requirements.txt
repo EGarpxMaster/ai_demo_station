@@ -6,3 +6,4 @@ gradio
 opencv-python-headless
 requests
 gdown
+faster-whisper

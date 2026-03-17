@@ -50,13 +50,18 @@ else
     echo -e "${GREEN}NVIDIA Container Toolkit ya está instalado.${NC}"
 fi
 
-# 4. Descargar modelos base locales (Si aplica, por ahora los descargará el Docker de visión, pero podemos descargar la carpeta para asegurar)
-echo -e "\n${BLUE}5. Preparando carpetas locales para modelos...${NC}"
+# 4. Descargar modelos base locales
+echo -e "\n${BLUE}5. Preparando carpetas locales y descargando modelos base...${NC}"
 mkdir -p models/vision models/voice models/llm
 echo -e "${GREEN}Carpetas de modelos creadas.${NC}"
 
-# Nota: La descarga del modelo YOLO desde GDrive estará en app.py, pero Ollama lo hará al iniciar su contenedor.
-# Aquí podríamos prefetchear el modelo si usamos GDrive con un script de curl, pero lo delegaremos a vision_service/model_downloader.py
+if [ ! -f "models/vision/yolo_custom.pt" ]; then
+    echo -e "${BLUE}Descargando modelo YOLO base (yolov8n.pt) como fallback...${NC}"
+    curl -L -o models/vision/yolo_custom.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
+    echo -e "${GREEN}Modelo YOLO base descargado.${NC}"
+else
+    echo -e "${GREEN}Modelo YOLO ya existe localmente.${NC}"
+fi
 
 echo -e "\n${GREEN}=== Instalación base (Host) completada ===${NC}"
 echo -e "Puedes iniciar el sistema con: ${BLUE}docker compose up -d${NC}"

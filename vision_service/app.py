@@ -6,6 +6,9 @@ import gradio as gr
 import requests
 import gdown
 from ultralytics import YOLO
+from faster_whisper import WhisperModel
+import threading
+import time
 
 # ==========================================
 # 0. CONFIGURACIÓN Y AUTO-DESCARGAS
@@ -67,12 +70,19 @@ def get_camera_source():
         source = 0
         print("[Vision Service] Asignando cámara: 0 (Windows API)")
     elif current_os == "Linux":
-        if os.path.exists("/dev/video0"):
+        # Preferir cámaras externas (usualmente video2 o video1) antes que la integrada (video0)
+        if os.path.exists("/dev/video2"):
+            source = "/dev/video2"
+            print("[Vision Service] Asignando cámara externa: /dev/video2")
+        elif os.path.exists("/dev/video1"):
+            source = "/dev/video1"
+            print("[Vision Service] Asignando cámara externa: /dev/video1")
+        elif os.path.exists("/dev/video0"):
             source = "/dev/video0"
-            print("[Vision Service] Asignando cámara: /dev/video0 (V4L2 Linux)")
+            print("[Vision Service] Asignando cámara integrada: /dev/video0 (V4L2 Linux)")
         else:
             source = 0
-            print("[Vision Service] /dev/video0 no existe, fallback a 0")
+            print("[Vision Service] /dev/videoX no existe, fallback a 0")
     else:
         source = 0
         print(f"[Vision Service] SO no contemplado, usando cámara 0 por defecto.")
@@ -80,29 +90,55 @@ def get_camera_source():
     return source
 
 # ==========================================
-# 3. LÓGICA CORE (VISIÓN & LLM)
+# 3. LÓGICA CORE (VISIÓN, VOZ & LLM)
 # ==========================================
-def process_frame(frame, model):
-    if frame is None:
-        return None
-    # Inferencia
-    results = model(frame, verbose=False)
-    # Dibujar bbox
-    annotated_frame = results[0].plot()
-    return annotated_frame
+current_frame = None
 
-def chat_with_guide(user_msg, history):
-    if not user_msg:
-        return history, ""
+def capture_thread(source):
+    global current_frame
+    cap = cv2.VideoCapture(source)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FPS, 30)
     
-    # Añadir mensaje de usuario al historial
-    history.append((user_msg, ""))
+    while True:
+        success, frame = cap.read()
+        if success:
+            # Espejar la imagen horizontalmente e invertir colores si es necesario
+            frame = cv2.flip(frame, 1)
+            current_frame = frame
+        time.sleep(0.01)
+
+def get_processed_frame(model):
+    global current_frame
+    if current_frame is not None:
+        results = model(current_frame, verbose=False)
+        annotated = results[0].plot()
+        return cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    return None
+
+def process_audio_chat(audio_path, history, stt_model):
+    if not audio_path:
+        return history, None, ""
+        
+    print(f"[Vision Service] Transcribiendo audio: {audio_path}")
+    segments, _ = stt_model.transcribe(audio_path, beam_size=5)
+    transcription = " ".join([segment.text for segment in segments]).strip()
     
-    # Preparar payload para Ollama
-    # Usamos llama3.2:1b como default ligero
+    if "unibot" not in transcription.lower():
+        # Wake word no detectada - Rechazo silencioso estilo Alexa
+        print("[Vision Service] Ignorando audio: No se detectó 'Unibot'.")
+        return history, None, "Esperando comando 'Unibot'..."
+    
+    # Wake word detectada
+    history.append({"role": "user", "content": transcription})
+    
+    # Prompt de sistema forzando brevedad
+    system_prompt = "Eres Unibot, una asistente de demostración de Inteligencia Artificial que siempre escucha y ve todo el entorno de forma continua. Responde de forma casual, carismática y MUY breve (1 o 2 oraciones máximo)."
+    
     payload = {
         "model": "llama3.2:1b", 
-        "prompt": user_msg,
+        "prompt": transcription,
+        "system": system_prompt,
         "stream": False
     }
     
@@ -113,8 +149,12 @@ def chat_with_guide(user_msg, history):
     except requests.exceptions.RequestException as e:
         bot_reply = f"Error conectando al Cerebro (LLM): {e}"
         
-    history[-1] = (user_msg, bot_reply)
-    return history, ""
+    history.append({"role": "assistant", "content": bot_reply})
+    
+    # Autogenerar audio de la respuesta
+    audio_reply = speak_text(bot_reply)
+    
+    return history, audio_reply, "Transcrito y procesado."
 
 def speak_text(texto):
     if not texto:
@@ -148,58 +188,49 @@ if __name__ == "__main__":
     print("[Vision Service] Cargando modelo YOLO...")
     model = YOLO(YOLO_MODEL_PATH)
     
-    def inference_loop(image):
-        return process_frame(image, model)
+    # Iniciar captura nativa de cámara en thread
+    threading.Thread(target=capture_thread, args=(cam_source,), daemon=True).start()
+    
+    # Cargar Whisper (STT)
+    print("[Vision Service] Cargando modelo Faster-Whisper para reconocimiento de voz...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # compute_type "int8" ensures it fits well in VRAM alongside YOLO and LLM
+    stt_model = WhisperModel("tiny", device=device, compute_type="int8" if device=="cuda" else "int8")
 
     print("[Vision Service] Levantando Panel de Control UI...")
-    
     with gr.Blocks(title="Estación Demostrativa IA", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🧠 Estación de IA: Visión, LLM y Voz")
         gr.Markdown("Demostración integral con YOLOv8, Ollama, y TTS corriendo de forma local.")
         
-        with gr.Row():
-            # Panel Izquierdo: Cámara
-            with gr.Column(scale=1):
-                gr.Markdown("### Visto por la IA")
-                # En Gradio 4, Image es streaming nativo desde cámara del cliente
-                # Para conectarse a cámara local del servidor (/dev/video0) requiere Custom Component 
-                # o un frame en bucle. Usaremos la webcam del navegador web (cliente) para mejor compatibilidad WSL.
-                camera_input = gr.Image(sources=["webcam"], streaming=True)
-                camera_output = gr.Image()
-                
-                # Link input -> output
-                camera_input.stream(inference_loop, inputs=camera_input, outputs=camera_output)
+        with gr.Tab("👁️ Visión por Computadora"):
+            gr.Markdown("### Detección de objetos en tiempo real")
+            # Un solo componente no interactivo
+            camera_view = gr.Image(label="Feed Nativo YOLOv8", interactive=False)
+            
+            # Streaming simulado a ~25 FPS (0.04) para UI más fluida sin WebRTC de Gradio
+            timer = gr.Timer(0.04)
+            timer.tick(lambda: get_processed_frame(model), inputs=None, outputs=camera_view)
 
-            # Panel Derecho: Chat y TTS
-            with gr.Column(scale=1):
-                gr.Markdown("### Guía IA (Chat)")
-                chatbot = gr.Chatbot(height=300)
-                msg = gr.Textbox(placeholder="Escribe algo a la guía...", label="Mensaje")
-                
-                # Chat functionality
-                msg.submit(chat_with_guide, [msg, chatbot], [chatbot, msg])
-                
-                # TTS functionality
-                gr.Markdown("### Voz")
-                tts_btn = gr.Button("🗣️ Hablar última respuesta")
-                audio_output = gr.Audio(label="Audio Sintetizado", autoplay=True)
-                
-                def extract_last_reply(chat_hist):
-                    if not chat_hist: return ""
-                    return chat_hist[-1][1]
-                    
-                tts_btn.click(
-                    fn=extract_last_reply, 
-                    inputs=chatbot, 
-                    outputs=msg # Variable temporal
-                ).then(
-                    fn=speak_text,
-                    inputs=msg,
-                    outputs=audio_output
-                ).then(
-                    fn=lambda: "",
-                    inputs=None,
-                    outputs=msg # Limpiar variable temporal
-                )
+        with gr.Tab("🎙️ Asistente de Voz IA"):
+            gr.Markdown("### Habla con Unibot (Dí 'Unibot' al inicio de tu pregunta)")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    audio_input = gr.Audio(sources=["microphone"], type="filepath", label="Micrófono (Habla aquí)")
+                    status_text = gr.Textbox(label="Estado STT", interactive=False)
+                with gr.Column(scale=1):
+                    audio_output = gr.Audio(label="Respuesta de Unibot", autoplay=True)
+            
+            chatbot = gr.Chatbot(height=300)
+            
+            # Conexión principal
+            audio_input.stop_recording(
+                fn=lambda a, h: process_audio_chat(a, h, stt_model),
+                inputs=[audio_input, chatbot],
+                outputs=[chatbot, audio_output, status_text]
+            ).then(
+                fn=lambda: None, # Limpiar input de micro
+                inputs=None,
+                outputs=audio_input
+            )
 
     demo.launch(server_name="0.0.0.0", server_port=7860)

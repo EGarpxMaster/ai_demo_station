@@ -43,8 +43,8 @@ try {
     Write-Host "Asegúrate de tener los últimos drivers NVIDIA instalados." -ForegroundColor Yellow
 }
 
-# 4. Crear estructura de modelos locales
-Write-Host "`n4. Preparando carpetas de modelos (Volume Binds)..." -ForegroundColor Cyan
+# 4. Crear estructura de modelos locales y descargar base
+Write-Host "`n4. Preparando carpetas de modelos (Volume Binds) y base..." -ForegroundColor Cyan
 $models_dirs = @("models\vision", "models\voice", "models\llm")
 foreach ($dir in $models_dirs) {
     if (-not (Test-Path $dir)) {
@@ -53,8 +53,14 @@ foreach ($dir in $models_dirs) {
     }
 }
 
-# La descarga pesada (YOLO, etc) se encomendará a los scripts Python en el contenedor (vision_service),
-# para usar un enviroment controlado. 
+$yolo_path = "models\vision\yolo_custom.pt"
+if (-not (Test-Path $yolo_path)) {
+    Write-Host "Descargando modelo YOLO base (yolov8n.pt) como fallback..." -ForegroundColor Cyan
+    curl.exe -L -o $yolo_path https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
+    Write-Host "Modelo YOLO base descargado." -ForegroundColor Green
+} else {
+    Write-Host "Modelo YOLO ya existe localmente." -ForegroundColor Green
+}
 
 Write-Host "`n=== Validación de Host (Windows) completada ===" -ForegroundColor Green
 Write-Host "Ejecuta: 'docker compose up -d' o 'docker-compose up -d' para levantar el sistema." -ForegroundColor Cyan

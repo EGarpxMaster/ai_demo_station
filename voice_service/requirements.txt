@@ -2,3 +2,7 @@ torch
 torchaudio
 flask
 requests
+omegaconf
+scipy
+numpy
+num2words
